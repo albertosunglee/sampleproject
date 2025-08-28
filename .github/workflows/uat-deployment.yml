@@ -166,7 +166,7 @@ jobs:
 
       - name: Upload Delta Package Artifact
         if: steps.delta-changes.outputs.has_changes == 'true'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: delta-package-${{ github.sha }}
           path: delta-package/

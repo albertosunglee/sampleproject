@@ -63,7 +63,7 @@ jobs:
           else
             # First push to branch - compare with main branch
             git fetch origin main:main
-            PREVIOUS_COMMIT="origin/main"
+            PREVIOUS_COMMIT="origin/UAT"
           fi
 
           echo "Comparing against: $PREVIOUS_COMMIT"

@@ -38,17 +38,17 @@ jobs:
       - name: Authenticate to UAT Org (JWT Bearer Flow)
         run: |
           # Create private key file from secret
-          echo "${{ secrets.SF_UAT_PRIVATE_KEY }}" > uat_private_key.pem
+          echo "${{ secrets.SF_UAT_PRIVATE_KEY }}" > uat_private_key.key
 
           # Authenticate using JWT Bearer Flow
           sf org login jwt \
             --client-id ${{ secrets.SF_UAT_CLIENT_ID }} \
-            --jwt-key-file uat_private_key.pem \
+            --jwt-key-file uat_private_key.key\
             --username ${{ secrets.SF_UAT_USERNAME }} \
             --alias uat-org
 
           # Clean up private key file
-          rm uat_private_key.pem
+          rm uat_private_key.key
 
           # Verify authentication
           sf org display --target-org uat-org

@@ -1,0 +1,145 @@
+name: Salesforce CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  SFDX_CLI_VERSION: latest
+  NODE_VERSION: '18'
+
+jobs:
+  code-quality:
+    name: Code Quality & Testing
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Run Jest Tests
+        run: npm run test:unit
+
+      - name: Upload Test Coverage
+        uses: codecov/codecov-action@v3
+        if: success()
+        with:
+          file: ./coverage/lcov.info
+          fail_ci_if_error: false
+
+  salesforce-validation:
+    name: Salesforce Validation
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli@${{ env.SFDX_CLI_VERSION }}
+          sf version --verbose
+
+      - name: Authenticate to DevHub
+        run: |
+          echo "${{ secrets.SFDX_AUTH_URL }}" > ./SFDX_AUTH_URL.txt
+          sf org login sfdx-url --sfdx-url-file ./SFDX_AUTH_URL.txt --alias devhub --set-default-dev-hub
+        env:
+          SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
+
+      - name: Create Scratch Org
+        id: create-scratch-org
+        run: |
+          SCRATCH_ORG_ALIAS="ci-scratch-$(date +%s)"
+          sf org create scratch --definition-file config/project-scratch-def.json --alias $SCRATCH_ORG_ALIAS --duration-days 1 --set-default --wait 10
+          echo "scratch_org_alias=$SCRATCH_ORG_ALIAS" >> $GITHUB_OUTPUT
+
+      - name: Deploy Source to Scratch Org
+        run: sf project deploy start --wait 10
+
+      - name: Run Apex Tests
+        run: |
+          sf apex run test --wait 10 --result-format human --code-coverage
+          sf apex get test --output-dir ./test-results --result-format human --code-coverage
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: apex-test-results
+          path: ./test-results/
+
+      - name: Clean Up Scratch Org
+        if: always()
+        run: sf org delete scratch --no-prompt --target-org ${{ steps.create-scratch-org.outputs.scratch_org_alias }}
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [code-quality, salesforce-validation]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli@${{ env.SFDX_CLI_VERSION }}
+          sf version --verbose
+
+      - name: Authenticate to Production Org
+        run: |
+          echo "${{ secrets.SFDX_PROD_AUTH_URL }}" > ./SFDX_PROD_AUTH_URL.txt
+          sf org login sfdx-url --sfdx-url-file ./SFDX_PROD_AUTH_URL.txt --alias production --set-default
+        env:
+          SFDX_PROD_AUTH_URL: ${{ secrets.SFDX_PROD_AUTH_URL }}
+
+      - name: Validate Deployment
+        run: sf project deploy start --dry-run --wait 10
+
+      - name: Deploy to Production
+        run: sf project deploy start --wait 30
+
+      - name: Run Apex Tests in Production
+        run: sf apex run test --wait 20 --result-format human --code-coverage
+
+  notify:
+    name: Notify Deployment Status
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: always() && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Notify Success
+        if: needs.deploy-production.result == 'success'
+        run: |
+          echo "✅ Deployment to production successful!"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Author: ${{ github.actor }}"
+
+      - name: Notify Failure
+        if: needs.deploy-production.result == 'failure'
+        run: |
+          echo "❌ Deployment to production failed!"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Author: ${{ github.actor }}"
+          exit 1

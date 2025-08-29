@@ -1,13 +1,14 @@
-name: UAT Delta Deployment (JWT Bearer Flow)
+name: UAT Delta Deployment (JWT + sfdx-git-delta)
 
 on:
   push:
     branches: [UAT]
-  workflow_dispatch: # Allow manual triggering
+  workflow_dispatch:
 
 env:
   SFDX_CLI_VERSION: latest
-  NODE_VERSION: "18"
+  NODE_VERSION: "20" # SGD v6 needs Node 20+ for the sf CLI runtime
+  SF_LOGIN_URL: https://test.salesforce.com
 
 jobs:
   delta-deployment:
@@ -18,8 +19,12 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          # Fetch full history for git diff
           fetch-depth: 0
+
+      - name: Ensure full git history / remotes
+        run: |
+          git fetch --all --prune
+          git branch -vv
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -30,200 +35,148 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
-      - name: Install Salesforce CLI
+      - name: Install Salesforce CLI + sfdx-git-delta
         run: |
           npm install -g @salesforce/cli@${{ env.SFDX_CLI_VERSION }}
-          sf version --verbose
+          sf --version
+          # Pin via org-level variable SGD_VERSION if you like (e.g., v6.17.0)
+          echo y | sf plugins install "sfdx-git-delta@${{ vars.SGD_VERSION || 'latest' }}"
+          sf plugins
 
-      - name: Authenticate to UAT Org (JWT Bearer Flow)
+      - name: Authenticate to UAT (JWT)
         run: |
-          # Create private key file from secret
           echo "${{ secrets.SF_UAT_PRIVATE_KEY }}" > uat_private_key.key
-
-          # Authenticate using JWT Bearer Flow
+          chmod 600 uat_private_key.key
           sf org login jwt \
-            --client-id ${{ secrets.SF_UAT_CLIENT_ID }} \
-            --jwt-key-file uat_private_key.key\
-            --username ${{ secrets.SF_UAT_USERNAME }} \
+            --client-id "${{ secrets.SF_UAT_CLIENT_ID }}" \
+            --jwt-key-file uat_private_key.key \
+            --username "${{ secrets.SF_UAT_USERNAME }}" \
+            --instance-url "${{ env.SF_LOGIN_URL }}" \
             --alias uat-org
-
-          # Clean up private key file
           rm uat_private_key.key
-
-          # Verify authentication
           sf org display --target-org uat-org
 
-      - name: Detect Delta Changes
-        id: delta-changes
+      - name: Compute FROM ref
+        id: base
+        shell: bash
         run: |
-          # Get the previous commit to compare against
           if [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
-            # Regular push - compare with previous commit
-            PREVIOUS_COMMIT="${{ github.event.before }}"
+            FROM_REF="${{ github.event.before }}"
           else
-            # First push to branch - compare with main branch
-            git fetch origin main:main
-            PREVIOUS_COMMIT="origin/UAT"
+            # first push to UAT: diff against main
+            git fetch origin main:origin/main || true
+            FROM_REF="origin/main"
+          fi
+          echo "from_ref=$FROM_REF" >> "$GITHUB_OUTPUT"
+          echo "Comparing FROM: $FROM_REF  TO: HEAD"
+
+      - name: Generate delta (SGD)
+        id: sgd
+        run: |
+          mkdir -p delta
+          # Limit to force-app (faster) and generate source + manifests
+          sf sgd source delta \
+            --from "${{ steps.base.outputs.from_ref }}" \
+            --to "HEAD" \
+            --source-dir "force-app" \
+            --output-dir "delta" \
+            --generate-delta
+          echo "Delta contents:"
+          ls -R delta || true
+
+      - name: Show manifests
+        run: |
+          echo "---- package.xml ----"
+          cat delta/package/package.xml || true
+          echo
+          echo "---- destructiveChanges.xml ----"
+          cat delta/destructiveChanges/destructiveChanges.xml || true
+
+      - name: Lint changed JS (optional)
+        run: |
+          CHANGED_JS=$(find delta -type f -name "*.js" || true)
+          if [ -n "$CHANGED_JS" ]; then
+            npx eslint $CHANGED_JS
+          else
+            echo "No JS changes."
           fi
 
-          echo "Comparing against: $PREVIOUS_COMMIT"
-
-          # Get changed files in force-app directory
-          CHANGED_FILES=$(git diff --name-only $PREVIOUS_COMMIT HEAD -- force-app/ | grep -E '\.(cls|trigger|page|component|email|layout|object|app|tab|permissionset|profile|flow|workflow|validationRule|customMetadata|customLabels|staticResource|lwc|aura)' || true)
-
-          if [ -z "$CHANGED_FILES" ]; then
-            echo "No Salesforce metadata files changed."
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            exit 0
+      - name: Deploy added/modified metadata to UAT
+        id: deploy_pkg
+        run: |
+          if [ -f delta/package/package.xml ] && grep -q "<types>" delta/package/package.xml; then
+            sf project deploy start \
+              -x delta/package/package.xml \
+              --target-org uat-org \
+              --wait 60
+            echo "did_pkg=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No package changes to deploy."
+            echo "did_pkg=false" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "Changed files:"
-          echo "$CHANGED_FILES"
-          echo "has_changes=true" >> $GITHUB_OUTPUT
-
-          # Create directory for delta package
-          mkdir -p delta-package
-
-          # Copy changed files to delta package directory
-          for file in $CHANGED_FILES; do
-            if [ -f "$file" ]; then
-              # Create directory structure
-              mkdir -p "delta-package/$(dirname "$file")"
-              cp "$file" "delta-package/$file"
-              
-              # Copy meta files if they exist
-              if [ -f "${file}-meta.xml" ]; then
-                cp "${file}-meta.xml" "delta-package/${file}-meta.xml"
-              fi
-            fi
-          done
-
-      - name: Generate Delta Package.xml
-        if: steps.delta-changes.outputs.has_changes == 'true'
+      - name: Run targeted Apex tests (if Apex classes changed)
         run: |
-          # Generate package.xml for delta changes
-          sf project generate manifest --source-dir delta-package/force-app --name delta-package/package.xml
-
-          echo "Generated package.xml:"
-          cat delta-package/package.xml
-
-      - name: Run Code Quality Checks on Delta
-        if: steps.delta-changes.outputs.has_changes == 'true'
-        run: |
-          # Run ESLint only on changed JavaScript files
-          CHANGED_JS_FILES=$(find delta-package -name "*.js" -type f || true)
-          if [ -n "$CHANGED_JS_FILES" ]; then
-            echo "Running ESLint on changed files..."
-            npx eslint $CHANGED_JS_FILES
-          else
-            echo "No JavaScript files to lint."
-          fi
-
-      - name: Create Validation Scratch Org
-        if: steps.delta-changes.outputs.has_changes == 'true'
-        id: create-scratch-org
-        run: |
-          SCRATCH_ORG_ALIAS="uat-validation-$(date +%s)"
-          sf org create scratch \
-            --definition-file config/project-scratch-def.json \
-            --alias $SCRATCH_ORG_ALIAS \
-            --duration-days 1 \
-            --set-default \
-            --wait 10 \
-            --target-dev-hub devhub
-          echo "scratch_org_alias=$SCRATCH_ORG_ALIAS" >> $GITHUB_OUTPUT
-
-      - name: Validate Delta Package in Scratch Org
-        if: steps.delta-changes.outputs.has_changes == 'true'
-        run: |
-          echo "Validating delta package in scratch org..."
-          sf project deploy start \
-            --manifest delta-package/package.xml \
-            --dry-run \
-            --wait 10
-
-          echo "Deploying delta package to scratch org for testing..."
-          sf project deploy start \
-            --manifest delta-package/package.xml \
-            --wait 10
-
-      - name: Run Apex Tests on Delta
-        if: steps.delta-changes.outputs.has_changes == 'true'
-        run: |
-          # Check if there are any test classes in the delta
-          TEST_CLASSES=$(find delta-package -name "*Test*.cls" -o -name "*_Test.cls" -o -name "Test*.cls" | sed 's/.*\///' | sed 's/\.cls$//' || true)
-
-          if [ -n "$TEST_CLASSES" ]; then
-            echo "Running specific test classes: $TEST_CLASSES"
-            for test_class in $TEST_CLASSES; do
-              sf apex run test \
-                --class-names $test_class \
-                --wait 10 \
-                --result-format human
-            done
-          else
-            echo "No test classes found in delta. Running all tests to ensure no regressions..."
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          pip install yq  # provides `xq`
+          TESTS=$(xq . < delta/package/package.xml | jq -r '
+            .Package.types
+            | (if type=="array" then . else [.] end)
+            | map(select(.name=="ApexClass"))
+            | .[].members
+            | (if type=="array" then . else [.] end)
+            | map(select(. | index("*") | not))
+            | unique
+            | join(",")
+          ')
+          if [ -n "$TESTS" ]; then
+            echo "Running specified tests: $TESTS"
             sf apex run test \
-              --wait 10 \
-              --result-format human \
-              --code-coverage
+              --target-org uat-org \
+              --test-level RunSpecifiedTests \
+              --tests "$TESTS" \
+              --wait 60 \
+              --result-format human
+          else
+            echo "No Apex class changes; running RunLocalTests."
+            sf apex run test \
+              --target-org uat-org \
+              --test-level RunLocalTests \
+              --wait 60 \
+              --result-format human
           fi
 
-      - name: Clean Up Validation Scratch Org
-        if: always() && steps.create-scratch-org.outputs.scratch_org_alias
-        run: sf org delete scratch --no-prompt --target-org ${{ steps.create-scratch-org.outputs.scratch_org_alias }}
-
-      - name: Deploy Delta to UAT Org
-        if: steps.delta-changes.outputs.has_changes == 'true'
+      - name: Apply destructive changes (if any)
         run: |
-          echo "Deploying delta package to UAT org..."
-          sf project deploy start \
-            --manifest delta-package/package.xml \
-            --target-org uat-org \
-            --wait 30
+          if [ -f delta/destructiveChanges/destructiveChanges.xml ] && grep -q "<types>" delta/destructiveChanges/destructiveChanges.xml; then
+            # Use the minimal manifest generated alongside destructiveChanges
+            sf project deploy start \
+              --post-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
+              --manifest delta/destructiveChanges/package.xml \
+              --target-org uat-org \
+              --ignore-warnings \
+              --wait 60
+          else
+            echo "No destructive changes to apply."
+          fi
+        # You can switch to --pre-destructive-changes if your process requires deletions first
 
-      - name: Run Quick Tests in UAT
-        if: steps.delta-changes.outputs.has_changes == 'true'
-        run: |
-          echo "Running quick validation tests in UAT org..."
-          sf apex run test \
-            --target-org uat-org \
-            --wait 10 \
-            --result-format human
-
-      - name: Upload Delta Package Artifact
-        if: steps.delta-changes.outputs.has_changes == 'true'
+      - name: Upload delta artifact
         uses: actions/upload-artifact@v4
         with:
-          name: delta-package-${{ github.sha }}
-          path: delta-package/
+          name: delta-${{ github.sha }}
+          path: delta/
           retention-days: 30
-
-      - name: Deployment Summary
-        if: always()
-        run: |
-          if [ "${{ steps.delta-changes.outputs.has_changes }}" == "true" ]; then
-            echo "✅ Delta deployment completed successfully!"
-            echo "🔐 Authentication: JWT Bearer Flow (Secure)"
-            echo "📦 Deployed package available as artifact: delta-package-${{ github.sha }}"
-          else
-            echo "ℹ️ No changes detected in Salesforce metadata. Deployment skipped."
-          fi
-          echo "🔗 Branch: ${{ github.ref_name }}"
-          echo "📝 Commit: ${{ github.sha }}"
-          echo "👤 Author: ${{ github.actor }}"
 
   notify-on-failure:
     name: Notify on Failure
     runs-on: ubuntu-latest
     needs: [delta-deployment]
     if: failure()
-
     steps:
-      - name: Notify Failure
-        run: |
+      - run: |
           echo "❌ UAT deployment failed!"
           echo "🔗 Branch: ${{ github.ref_name }}"
           echo "📝 Commit: ${{ github.sha }}"
           echo "👤 Author: ${{ github.actor }}"
-          echo "Please check the workflow logs for details."

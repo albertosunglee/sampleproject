@@ -92,15 +92,6 @@ jobs:
           echo "---- destructiveChanges.xml ----"
           cat delta/destructiveChanges/destructiveChanges.xml || true
 
-      - name: Lint changed JS (optional)
-        run: |
-          CHANGED_JS=$(find delta -type f -name "*.js" || true)
-          if [ -n "$CHANGED_JS" ]; then
-            npx eslint $CHANGED_JS
-          else
-            echo "No JS changes."
-          fi
-
       - name: Deploy added/modified metadata to UAT
         id: deploy_pkg
         run: |

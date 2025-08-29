@@ -63,9 +63,9 @@ jobs:
           if [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
             FROM_REF="${{ github.event.before }}"
           else
-            # first push to UAT: diff against main
-            git fetch origin main:origin/main || true
-            FROM_REF="origin/main"
+            # first push to UAT: diff against UAT
+            git fetch origin UAT:origin/UAT || true
+            FROM_REF="origin/UAT"
           fi
           echo "from_ref=$FROM_REF" >> "$GITHUB_OUTPUT"
           echo "Comparing FROM: $FROM_REF  TO: HEAD"

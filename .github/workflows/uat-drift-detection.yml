@@ -184,7 +184,7 @@ jobs:
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
             echo "Changes detected! Committing drift..."
-            git commit -m "🔍 Drift detection: UAT org metadata retrieved on $(date)"
+            git commit -m "🔍 Drift detection: UAT org metadata retrieved on $(date)" --no-verify
             git push origin "${{ steps.branch.outputs.branch_name }}"
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
           fi

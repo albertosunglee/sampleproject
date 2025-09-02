@@ -1,0 +1,252 @@
+name: UAT Drift Detection
+
+on:
+  workflow_dispatch:
+
+env:
+  SFDX_CLI_VERSION: latest
+  NODE_VERSION: "20"
+  SF_LOGIN_URL: https://test.salesforce.com
+
+jobs:
+  drift-detection:
+    name: UAT Drift Detection
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: UAT
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli@${{ env.SFDX_CLI_VERSION }}
+          sf --version
+
+      - name: Authenticate to UAT (JWT)
+        run: |
+          echo "${{ secrets.SF_UAT_PRIVATE_KEY }}" > uat_private_key.key
+          chmod 600 uat_private_key.key
+          sf org login jwt \
+            --client-id "${{ secrets.SF_UAT_CLIENT_ID }}" \
+            --jwt-key-file uat_private_key.key \
+            --username "${{ secrets.SF_UAT_USERNAME }}" \
+            --instance-url "${{ env.SF_LOGIN_URL }}" \
+            --alias uat-org
+          rm uat_private_key.key
+          sf org display --target-org uat-org
+
+      - name: Create drift detection branch
+        id: branch
+        run: |
+          BRANCH_NAME="drift-detection/$(date +'%Y-%m-%d-%H%M%S')"
+          echo "branch_name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH_NAME"
+          echo "Created branch: $BRANCH_NAME"
+
+      - name: Retrieve all metadata from UAT org
+        run: |
+          echo "Retrieving all metadata from UAT org..."
+          # Create a package.xml that includes all metadata types
+          mkdir -p manifest
+          cat > manifest/package-all.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Package xmlns="http://soap.sforce.com/2006/04/metadata">
+              <types>
+                  <members>*</members>
+                  <name>ApexClass</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>ApexComponent</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>ApexPage</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>ApexTestSuite</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>ApexTrigger</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>AuraDefinitionBundle</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>CustomApplication</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>CustomField</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>CustomLabel</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>CustomMetadata</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>CustomObject</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>CustomTab</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>Flow</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>FlowDefinition</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>Layout</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>LightningComponentBundle</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>PermissionSet</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>Profile</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>Queue</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>RemoteSiteSetting</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>Report</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>Role</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>StaticResource</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>ValidationRule</name>
+              </types>
+              <types>
+                  <members>*</members>
+                  <name>Workflow</name>
+              </types>
+              <version>60.0</version>
+          </Package>
+          EOF
+
+          # Retrieve metadata
+          sf project retrieve start \
+            --manifest manifest/package-all.xml \
+            --target-org uat-org \
+            --wait 30
+
+      - name: Check for changes and commit
+        id: changes
+        run: |
+          git add .
+          if git diff --staged --quiet; then
+            echo "No changes detected between UAT org and repository"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changes detected! Committing drift..."
+            git commit -m "🔍 Drift detection: UAT org metadata retrieved on $(date)" --no-verify
+            git push origin "${{ steps.branch.outputs.branch_name }}"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create Pull Request
+        if: steps.changes.outputs.has_changes == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pullRequest } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🔍 UAT Drift Detection - ${new Date().toISOString().split('T')[0]}`,
+              head: '${{ steps.branch.outputs.branch_name }}',
+              base: 'UAT',
+              body: `## UAT Org Drift Detection Report
+
+            This pull request was automatically created to detect changes made directly in the UAT org that are not reflected in the repository.
+
+            ### Summary
+            - **Detection Date**: ${new Date().toLocaleString()}
+            - **Branch**: \`${{ steps.branch.outputs.branch_name }}\`
+            - **Trigger**: ${{ github.event_name == 'schedule' && 'Scheduled (Daily 9 AM)' || 'Manual' }}
+
+            ### What to do next:
+            1. **Review the changes** in this PR to understand what was modified directly in the org
+            2. **Decide on each change**:
+               - If the change should be kept: Merge this PR to sync the repository
+               - If the change should be reverted: Close this PR and revert the changes in the org
+               - If the change needs modification: Use this PR as a starting point
+
+            ### Important Notes:
+            - Changes shown here were made directly in the UAT org outside of the normal CI/CD process
+            - These changes are not reflected in your source control until this PR is merged
+            - Consider updating your development process to ensure all changes go through proper source control
+
+            ---
+            *This PR was automatically generated by the UAT Drift Detection workflow*`
+            });
+
+            console.log(`Created pull request #${pullRequest.number}`);
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.changes.outputs.has_changes }}" == "true" ]; then
+            echo "✅ Drift detection completed - Changes found and PR created"
+            echo "🔗 Pull request created for branch: ${{ steps.branch.outputs.branch_name }}"
+          else
+            echo "✅ Drift detection completed - No changes detected"
+            echo "🎉 UAT org is in sync with repository"
+            # Clean up the branch since no changes were found
+            git push origin --delete "${{ steps.branch.outputs.branch_name }}" || true
+          fi
+
+  notify-on-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [drift-detection]
+    if: failure()
+    steps:
+      - run: |
+          echo "❌ UAT drift detection failed!"
+          echo "🔗 Workflow: ${{ github.workflow }}"
+          echo "📝 Run ID: ${{ github.run_id }}"
+          echo "🕒 Time: $(date)"

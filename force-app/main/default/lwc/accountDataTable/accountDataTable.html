@@ -1,94 +1,125 @@
 <template>
-    <lightning-card title="Account Data Table" icon-name="standard:account">
-        <div class="slds-p-horizontal_small">
-            <!-- Search Box -->
-            <div class="slds-m-bottom_medium">
-                <lightning-input
-                    type="search"
-                    label="Search Accounts"
-                    value={searchTerm}
-                    onchange={handleSearchChange}
-                    placeholder="Search by name, type, industry, phone, website, or city..."
-                    variant="label-hidden">
-                </lightning-input>
-            </div>
+  <lightning-card title="Account Data Table" icon-name="standard:account">
+    <div class="slds-p-horizontal_small">
+      <!-- Search Box -->
+      <div class="slds-m-bottom_medium">
+        <lightning-input
+          type="search"
+          label="Search Accounts alberto"
+          value={searchTerm}
+          onchange={handleSearchChange}
+          placeholder="Search by name, type, industry, phone, website, or city..."
+          variant="label-hidden"
+        >
+        </lightning-input>
+      </div>
+
 
             <!-- Records Info -->
             <div class="slds-m-bottom_small">
                 <p class="slds-text-body_small slds-text-color_weak">
                     alberto Showing {startRecord} to {endRecord} of {totalRecords} records
                 </p>
-            </div>
+      </div>
 
-            <!-- Data Table -->
-            <div if:true={data.length}>
-                <lightning-datatable
-                    key-field="Id"
-                    data={paginatedData}
-                    columns={columns}
-                    onsort={handleSort}
-                    sorted-by={sortedBy}
-                    sorted-direction={sortDirection}
-                    hide-checkbox-column="true">
-                </lightning-datatable>
+      <!-- Data Table -->
+      <div if:true={data.length}>
+        <lightning-datatable
+          key-field="Id"
+          data={paginatedData}
+          columns={columns}
+          onsort={handleSort}
+          sorted-by={sortedBy}
+          sorted-direction={sortDirection}
+          hide-checkbox-column="true"
+        >
+        </lightning-datatable>
 
-                <!-- Pagination Controls -->
-                <div class="slds-m-top_medium slds-grid slds-grid_align-spread slds-grid_vertical-align-center">
-                    <div class="slds-col">
-                        <lightning-combobox
-                            name="pageSize"
-                            label="Records per page"
-                            value={pageSize}
-                            options={pageSizeOptions}
-                            onchange={handlePageSizeChange}
-                            variant="label-hidden"
-                            class="page-size-selector">
-                        </lightning-combobox>
-                    </div>
-                    <div class="slds-col">
-                        <div class="slds-grid slds-grid_align-end">
-                            <lightning-button
-                                label="Previous"
-                                onclick={handlePrevious}
-                                disabled={isFirstPage}
-                                variant="neutral">
-                            </lightning-button>
-                            <div class="slds-p-horizontal_small slds-grid slds-grid_vertical-align-center">
-                                <span class="slds-text-body_small">
-                                    Page {currentPage} of {totalPages}
-                                </span>
-                            </div>
-                            <lightning-button
-                                label="Next"
-                                onclick={handleNext}
-                                disabled={isLastPage}
-                                variant="neutral">
-                            </lightning-button>
-                        </div>
-                    </div>
-                </div>
+        <!-- Pagination Controls -->
+        <div
+          class="slds-m-top_medium slds-grid slds-grid_align-spread slds-grid_vertical-align-center"
+        >
+          <div class="slds-col">
+            <lightning-combobox
+              name="pageSize"
+              label="Records per page"
+              value={pageSize}
+              options={pageSizeOptions}
+              onchange={handlePageSizeChange}
+              variant="label-hidden"
+              class="page-size-selector"
+            >
+            </lightning-combobox>
+          </div>
+          <div class="slds-col">
+            <div class="slds-grid slds-grid_align-end">
+              <lightning-button
+                label="Previous"
+                onclick={handlePrevious}
+                disabled={isFirstPage}
+                variant="neutral"
+              >
+              </lightning-button>
+              <div
+                class="slds-p-horizontal_small slds-grid slds-grid_vertical-align-center"
+              >
+                <span class="slds-text-body_small">
+                  Page {currentPage} of {totalPages}
+                </span>
+              </div>
+              <lightning-button
+                label="Next"
+                onclick={handleNext}
+                disabled={isLastPage}
+                variant="neutral"
+              >
+              </lightning-button>
             </div>
-
-            <!-- No Data Message -->
-            <div if:false={data.length} class="slds-text-align_center slds-p-vertical_large">
-                <lightning-icon icon-name="utility:info" size="medium" class="slds-m-bottom_small"></lightning-icon>
-                <p class="slds-text-heading_small">No accounts found</p>
-                <p class="slds-text-body_regular slds-text-color_weak">
-                    Try adjusting your search criteria or check if accounts exist in the system.
-                </p>
-            </div>
-
-            <!-- Loading Spinner -->
-            <div if:true={isLoading} class="slds-text-align_center slds-p-vertical_large">
-                <lightning-spinner alternative-text="Loading accounts..." size="medium"></lightning-spinner>
-            </div>
-
-            <!-- Error Message -->
-            <div if:true={error} class="slds-text-align_center slds-p-vertical_large">
-                <lightning-icon icon-name="utility:error" variant="error" size="medium" class="slds-m-bottom_small"></lightning-icon>
-                <p class="slds-text-heading_small slds-text-color_error">Error Loading Accounts</p>
-                <p class="slds-text-body_regular slds-text-color_weak">{error}</p>
-            </div>
+          </div>
         </div>
-    </lightning-card>
+      </div>
+
+      <!-- No Data Message -->
+      <div
+        if:false={data.length}
+        class="slds-text-align_center slds-p-vertical_large"
+      >
+        <lightning-icon
+          icon-name="utility:info"
+          size="medium"
+          class="slds-m-bottom_small"
+        ></lightning-icon>
+        <p class="slds-text-heading_small">No accounts found</p>
+        <p class="slds-text-body_regular slds-text-color_weak">
+          Try adjusting your search criteria or check if accounts exist in the
+          system.
+        </p>
+      </div>
+
+      <!-- Loading Spinner -->
+      <div
+        if:true={isLoading}
+        class="slds-text-align_center slds-p-vertical_large"
+      >
+        <lightning-spinner
+          alternative-text="Loading accounts..."
+          size="medium"
+        ></lightning-spinner>
+      </div>
+
+      <!-- Error Message -->
+      <div if:true={error} class="slds-text-align_center slds-p-vertical_large">
+        <lightning-icon
+          icon-name="utility:error"
+          variant="error"
+          size="medium"
+          class="slds-m-bottom_small"
+        ></lightning-icon>
+        <p class="slds-text-heading_small slds-text-color_error">
+          Error Loading Accounts
+        </p>
+        <p class="slds-text-body_regular slds-text-color_weak">{error}</p>
+      </div>
+    </div>
+  </lightning-card>
 </template>

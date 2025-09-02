@@ -1,7 +1,14 @@
 name: UAT Drift Detection
 
 on:
+  schedule:
+    # Run daily at 9:00 AM UTC (adjust timezone as needed)
+    - cron: "0 9 * * *"
   workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
 
 env:
   SFDX_CLI_VERSION: latest
@@ -19,6 +26,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: UAT
+          token: ${{ secrets.TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

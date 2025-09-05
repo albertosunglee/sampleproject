@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description
+  >Basic access to Project custom object - deploy after object creation</description>
+    <hasActivationRequired>false</hasActivationRequired>
+    <label>Project Basic Access</label>
+    
+    <!-- Tab Visibility Only - No Object Permissions Initially -->
+    <tabSettings>
+        <tab>Project__c</tab>
+        <visibility>Visible</visibility>
+    </tabSettings>
+    
+    <!-- Application Visibility -->
+    <applicationVisibilities>
+        <application>standard__Sales</application>
+        <visible>true</visible>
+    </applicationVisibilities>
+</PermissionSet>

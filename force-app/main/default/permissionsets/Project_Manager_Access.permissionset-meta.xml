@@ -67,12 +67,10 @@
     <!-- Application Visibility - Add Projects tab to standard apps -->
     <applicationVisibilities>
         <application>standard__Sales</application>
-        <default>false</default>
         <visible>true</visible>
     </applicationVisibilities>
     <applicationVisibilities>
         <application>standard__Service</application>
-        <default>false</default>
         <visible>true</visible>
     </applicationVisibilities>
     

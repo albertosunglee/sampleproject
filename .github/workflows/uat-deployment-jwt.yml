@@ -4,11 +4,43 @@ on:
   push:
     branches: [UAT]
   workflow_dispatch:
+    inputs:
+      deployment_scope:
+        description: "What to deploy"
+        required: true
+        default: "full"
+        type: choice
+        options:
+          - "full"
+          - "objects_only"
+          - "permission_sets_only"
+          - "custom_selection"
+      include_permission_sets:
+        description: "Include Permission Sets in deployment"
+        required: false
+        default: true
+        type: boolean
+      include_tabs:
+        description: "Include Custom Tabs in deployment"
+        required: false
+        default: true
+        type: boolean
+      from_commit:
+        description: "Deploy from specific commit (optional - leave empty for auto)"
+        required: false
+        default: ""
+        type: string
+      force_deployment:
+        description: "Force deployment even if drift detected"
+        required: false
+        default: false
+        type: boolean
 
 env:
   SFDX_CLI_VERSION: latest
   NODE_VERSION: "20" # SGD v6 needs Node 20+ for the sf CLI runtime
   SF_LOGIN_URL: https://test.salesforce.com
+  HALT_ON_DRIFT: ${{ inputs.force_deployment == true && 'false' || 'false' }} # Dynamic based on force_deployment parameter
 
 jobs:
   delta-deployment:
@@ -60,12 +92,18 @@ jobs:
         id: base
         shell: bash
         run: |
-          if [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+          # Check if manual from_commit parameter is provided
+          if [ -n "${{ inputs.from_commit }}" ]; then
+            FROM_REF="${{ inputs.from_commit }}"
+            echo "🎯 Using manual FROM commit: $FROM_REF"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
             FROM_REF="${{ github.event.before }}"
+            echo "📝 Using automatic FROM commit: $FROM_REF"
           else
             # first push to UAT: diff against UAT
             git fetch origin UAT:origin/UAT || true
             FROM_REF="origin/UAT"
+            echo "🌿 Using branch reference: $FROM_REF"
           fi
           echo "from_ref=$FROM_REF" >> "$GITHUB_OUTPUT"
           echo "Comparing FROM: $FROM_REF  TO: HEAD"
@@ -84,6 +122,70 @@ jobs:
           echo "Delta contents:"
           ls -R delta || true
 
+      - name: Filter Delta Based on Deployment Scope
+        id: filter_delta
+        run: |
+          echo "🔍 Filtering delta based on deployment scope: ${{ inputs.deployment_scope }}"
+
+          # Copy original delta to backup
+          cp -r delta/ delta-backup/ || true
+
+          case "${{ inputs.deployment_scope }}" in
+            "objects_only")
+              echo "📦 Deploying OBJECTS ONLY (no PermissionSets, no Tabs)"
+              # Remove PermissionSets from delta
+              if [ -d "delta" ]; then
+                find delta -name "*permissionset*" -type f -delete || true
+                find delta -name "*PermissionSet*" -type f -delete || true
+                find delta -name "*tab*" -type f -delete || true
+                find delta -name "*Tab*" -type f -delete || true
+              fi
+              ;;
+            "permission_sets_only")
+              echo "🔐 Deploying PERMISSION SETS ONLY"
+              # Keep only PermissionSets in delta
+              if [ -d "delta" ]; then
+                find delta -type f ! -name "*permissionset*" ! -name "*PermissionSet*" ! -name "package.xml" -delete || true
+              fi
+              ;;
+            "custom_selection")
+              echo "🎛️  Custom selection based on parameters"
+              if [ "${{ inputs.include_permission_sets }}" != "true" ]; then
+                echo "❌ Excluding Permission Sets"
+                find delta -name "*permissionset*" -type f -delete || true
+                find delta -name "*PermissionSet*" -type f -delete || true
+              fi
+              if [ "${{ inputs.include_tabs }}" != "true" ]; then
+                echo "❌ Excluding Custom Tabs"
+                find delta -name "*tab*" -type f -delete || true
+                find delta -name "*Tab*" -type f -delete || true
+              fi
+              ;;
+            *)
+              echo "📦 Full deployment - no filtering"
+              ;;
+          esac
+
+          # Regenerate package.xml after filtering
+          if [ -d "delta" ] && [ "${{ inputs.deployment_scope }}" != "full" ]; then
+            echo "🔄 Regenerating package.xml after filtering..."
+            sf sgd source delta \
+              --from "${{ steps.base.outputs.from_ref }}" \
+              --to "HEAD" \
+              --source-dir "delta" \
+              --output-dir "delta-temp" \
+              --generate-delta || true
+            
+            # Use the regenerated package.xml if it exists
+            if [ -f "delta-temp/package/package.xml" ]; then
+              cp delta-temp/package/package.xml delta/package/package.xml || true
+            fi
+            rm -rf delta-temp || true
+          fi
+
+          echo "📋 Final delta contents after filtering:"
+          ls -R delta || true
+
       - name: Show manifests
         run: |
           echo "---- package.xml ----"
@@ -91,6 +193,122 @@ jobs:
           echo
           echo "---- destructiveChanges.xml ----"
           cat delta/destructiveChanges/destructiveChanges.xml || true
+
+      - name: Delta-based Drift Detection
+        id: drift_check
+        run: |
+          echo "🔍 Checking for drift in metadata to be deployed (delta-based)..."
+
+          # Create drift detection directories
+          mkdir -p drift-check/org-delta-metadata
+          mkdir -p drift-check/repo-delta-metadata
+
+          # Check if we have a delta package to analyze
+          if [ -f delta/package/package.xml ] && grep -q "<types>" delta/package/package.xml; then
+            echo "📦 Analyzing delta package for drift detection..."
+            
+            # Copy delta metadata from repository to drift-check
+            if [ -d "delta" ]; then
+              cp -r delta/ drift-check/repo-delta-metadata/ || true
+            fi
+            
+            # Retrieve ONLY the delta metadata from the org for comparison
+            echo "📥 Retrieving delta metadata from UAT org..."
+            sf project retrieve start \
+              --manifest delta/package/package.xml \
+              --target-org uat-org \
+              --target-metadata-dir drift-check/org-delta-metadata \
+              --wait 30 || true
+            
+            # Compare delta metadata between org and repository
+            DRIFT_DETECTED=false
+            if [ -d "drift-check/org-delta-metadata" ] && [ -d "drift-check/repo-delta-metadata" ]; then
+              # Compare only the source metadata (not the generated manifests)
+              if [ -d "drift-check/org-delta-metadata/force-app" ] && [ -d "delta" ]; then
+                if ! diff -r -q delta/ drift-check/org-delta-metadata/ > drift-check/drift-summary.txt 2>&1; then
+                  DRIFT_DETECTED=true
+                  echo "⚠️  DELTA DRIFT DETECTED: UAT org differs from repository for deployment metadata!"
+                  echo "📁 Drift details saved to drift-check/ folder"
+                  
+                  # Create detailed drift report
+                  echo "# UAT Org Delta Drift Detection Report" > drift-check/DRIFT_REPORT.md
+                  echo "**Detection Date:** $(date)" >> drift-check/DRIFT_REPORT.md
+                  echo "**Branch:** ${{ github.ref_name }}" >> drift-check/DRIFT_REPORT.md
+                  echo "**Commit:** ${{ github.sha }}" >> drift-check/DRIFT_REPORT.md
+                  echo "**Deployment Type:** Delta-based" >> drift-check/DRIFT_REPORT.md
+                  echo "" >> drift-check/DRIFT_REPORT.md
+                  echo "## Summary" >> drift-check/DRIFT_REPORT.md
+                  echo "The UAT org contains different versions of metadata that you are about to deploy." >> drift-check/DRIFT_REPORT.md
+                  echo "This means someone may have made changes directly in the org that conflict with your deployment." >> drift-check/DRIFT_REPORT.md
+                  echo "" >> drift-check/DRIFT_REPORT.md
+                  echo "## Delta Package Being Deployed" >> drift-check/DRIFT_REPORT.md
+                  echo "\`\`\`xml" >> drift-check/DRIFT_REPORT.md
+                  cat delta/package/package.xml >> drift-check/DRIFT_REPORT.md
+                  echo "\`\`\`" >> drift-check/DRIFT_REPORT.md
+                  echo "" >> drift-check/DRIFT_REPORT.md
+                  echo "## Differences Found in Delta Metadata" >> drift-check/DRIFT_REPORT.md
+                  echo "\`\`\`" >> drift-check/DRIFT_REPORT.md
+                  cat drift-check/drift-summary.txt >> drift-check/DRIFT_REPORT.md
+                  echo "\`\`\`" >> drift-check/DRIFT_REPORT.md
+                  echo "" >> drift-check/DRIFT_REPORT.md
+                  echo "## Actions Required" >> drift-check/DRIFT_REPORT.md
+                  echo "1. **Critical**: Review drift in metadata you're about to deploy" >> drift-check/DRIFT_REPORT.md
+                  echo "2. Check \`org-delta-metadata/\` folder to see current org state of delta metadata" >> drift-check/DRIFT_REPORT.md
+                  echo "3. Check \`repo-delta-metadata/\` folder to see repository state of delta metadata" >> drift-check/DRIFT_REPORT.md
+                  echo "4. Decide whether to:" >> drift-check/DRIFT_REPORT.md
+                  echo "   - **Continue**: Deploy and overwrite org changes (will lose org modifications)" >> drift-check/DRIFT_REPORT.md
+                  echo "   - **Halt**: Stop deployment and manually sync the drift first" >> drift-check/DRIFT_REPORT.md
+                  echo "   - **Investigate**: Review each conflicting file individually" >> drift-check/DRIFT_REPORT.md
+                  
+                  # Output for GitHub Actions
+                  echo "📋 Delta drift summary:"
+                  cat drift-check/drift-summary.txt
+                else
+                  echo "✅ No drift detected in delta metadata - org and repository are aligned for deployment"
+                fi
+              else
+                echo "⚠️  Could not compare delta metadata properly"
+                DRIFT_DETECTED=false
+              fi
+            else
+              echo "⚠️  Could not retrieve delta metadata from org for drift comparison"
+              DRIFT_DETECTED=false
+            fi
+          else
+            echo "ℹ️  No delta package found - skipping drift detection"
+            DRIFT_DETECTED=false
+          fi
+
+          echo "drift_detected=$DRIFT_DETECTED" >> "$GITHUB_OUTPUT"
+
+      - name: Handle Delta Drift Detection Results
+        run: |
+          if [ "${{ steps.drift_check.outputs.drift_detected }}" == "true" ]; then
+            echo "⚠️  DELTA DRIFT DETECTED BEFORE DEPLOYMENT!"
+            echo "📋 This means the metadata you're about to deploy differs from what's currently in the UAT org."
+            echo ""
+            cat drift-check/DRIFT_REPORT.md || true
+            echo ""
+            
+            if [ "${{ env.HALT_ON_DRIFT }}" == "true" ] && [ "${{ inputs.force_deployment }}" != "true" ]; then
+              echo "❌ HALTING DEPLOYMENT due to detected delta drift (HALT_ON_DRIFT=true)"
+              echo "Please review the drift-check artifact and resolve differences before deploying."
+              echo "The conflicting metadata must be synchronized before deployment can proceed."
+              echo "💡 To force deployment anyway, re-run with 'Force deployment' parameter set to true."
+              exit 1
+            else
+              if [ "${{ inputs.force_deployment }}" == "true" ]; then
+                echo "🚀 FORCING DEPLOYMENT despite delta drift (force_deployment=true)"
+              else
+                echo "⚠️  PROCEEDING WITH DEPLOYMENT despite delta drift (HALT_ON_DRIFT=false)"
+              fi
+              echo "⚠️  WARNING: This deployment will overwrite the detected org changes in the delta metadata!"
+              echo "🔄 Any changes made directly in the org for the affected metadata will be lost."
+            fi
+          else
+            echo "✅ No delta drift detected - proceeding with deployment"
+            echo "📦 Delta metadata in org matches repository - safe to deploy"
+          fi
 
       - name: Deploy added/modified metadata to UAT
         id: deploy_pkg
@@ -160,6 +378,14 @@ jobs:
           path: delta/
           retention-days: 30
 
+      - name: Upload drift check artifact
+        if: always() && steps.drift_check.outputs.drift_detected == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-check-${{ github.sha }}
+          path: drift-check/
+          retention-days: 30
+
   notify-on-failure:
     name: Notify on Failure
     runs-on: ubuntu-latest
@@ -171,3 +397,8 @@ jobs:
           echo "🔗 Branch: ${{ github.ref_name }}"
           echo "📝 Commit: ${{ github.sha }}"
           echo "👤 Author: ${{ github.actor }}"
+          echo ""
+          echo "💡 If deployment failed due to drift detection:"
+          echo "   1. Check the drift-check artifact for details"
+          echo "   2. Review org vs repository differences"
+          echo "   3. Either sync drift to repo or set HALT_ON_DRIFT=false"

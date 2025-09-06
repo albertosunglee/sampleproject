@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<CustomTab xmlns="http://soap.sforce.com/2006/04/metadata">
+    <customObject>true</customObject>
+    <description>Tab for Project custom object</description>
+    <label>Projects</label>
+    <motif>Custom18: Gears</motif>
+    <sObjectType>Project__c</sObjectType>
+</CustomTab>

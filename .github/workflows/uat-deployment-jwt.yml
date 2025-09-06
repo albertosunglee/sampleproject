@@ -4,12 +4,43 @@ on:
   push:
     branches: [UAT]
   workflow_dispatch:
+    inputs:
+      deployment_scope:
+        description: "What to deploy"
+        required: true
+        default: "full"
+        type: choice
+        options:
+          - "full"
+          - "objects_only"
+          - "permission_sets_only"
+          - "custom_selection"
+      include_permission_sets:
+        description: "Include Permission Sets in deployment"
+        required: false
+        default: true
+        type: boolean
+      include_tabs:
+        description: "Include Custom Tabs in deployment"
+        required: false
+        default: true
+        type: boolean
+      from_commit:
+        description: "Deploy from specific commit (optional - leave empty for auto)"
+        required: false
+        default: ""
+        type: string
+      force_deployment:
+        description: "Force deployment even if drift detected"
+        required: false
+        default: false
+        type: boolean
 
 env:
   SFDX_CLI_VERSION: latest
   NODE_VERSION: "20" # SGD v6 needs Node 20+ for the sf CLI runtime
   SF_LOGIN_URL: https://test.salesforce.com
-  HALT_ON_DRIFT: false # Set to true to halt deployment when drift is detected
+  HALT_ON_DRIFT: ${{ inputs.force_deployment == true && 'false' || 'false' }} # Dynamic based on force_deployment parameter
 
 jobs:
   delta-deployment:
@@ -61,12 +92,18 @@ jobs:
         id: base
         shell: bash
         run: |
-          if [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+          # Check if manual from_commit parameter is provided
+          if [ -n "${{ inputs.from_commit }}" ]; then
+            FROM_REF="${{ inputs.from_commit }}"
+            echo "🎯 Using manual FROM commit: $FROM_REF"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
             FROM_REF="${{ github.event.before }}"
+            echo "📝 Using automatic FROM commit: $FROM_REF"
           else
             # first push to UAT: diff against UAT
             git fetch origin UAT:origin/UAT || true
             FROM_REF="origin/UAT"
+            echo "🌿 Using branch reference: $FROM_REF"
           fi
           echo "from_ref=$FROM_REF" >> "$GITHUB_OUTPUT"
           echo "Comparing FROM: $FROM_REF  TO: HEAD"
@@ -83,6 +120,70 @@ jobs:
             --output-dir "delta" \
             --generate-delta
           echo "Delta contents:"
+          ls -R delta || true
+
+      - name: Filter Delta Based on Deployment Scope
+        id: filter_delta
+        run: |
+          echo "🔍 Filtering delta based on deployment scope: ${{ inputs.deployment_scope }}"
+
+          # Copy original delta to backup
+          cp -r delta/ delta-backup/ || true
+
+          case "${{ inputs.deployment_scope }}" in
+            "objects_only")
+              echo "📦 Deploying OBJECTS ONLY (no PermissionSets, no Tabs)"
+              # Remove PermissionSets from delta
+              if [ -d "delta" ]; then
+                find delta -name "*permissionset*" -type f -delete || true
+                find delta -name "*PermissionSet*" -type f -delete || true
+                find delta -name "*tab*" -type f -delete || true
+                find delta -name "*Tab*" -type f -delete || true
+              fi
+              ;;
+            "permission_sets_only")
+              echo "🔐 Deploying PERMISSION SETS ONLY"
+              # Keep only PermissionSets in delta
+              if [ -d "delta" ]; then
+                find delta -type f ! -name "*permissionset*" ! -name "*PermissionSet*" ! -name "package.xml" -delete || true
+              fi
+              ;;
+            "custom_selection")
+              echo "🎛️  Custom selection based on parameters"
+              if [ "${{ inputs.include_permission_sets }}" != "true" ]; then
+                echo "❌ Excluding Permission Sets"
+                find delta -name "*permissionset*" -type f -delete || true
+                find delta -name "*PermissionSet*" -type f -delete || true
+              fi
+              if [ "${{ inputs.include_tabs }}" != "true" ]; then
+                echo "❌ Excluding Custom Tabs"
+                find delta -name "*tab*" -type f -delete || true
+                find delta -name "*Tab*" -type f -delete || true
+              fi
+              ;;
+            *)
+              echo "📦 Full deployment - no filtering"
+              ;;
+          esac
+
+          # Regenerate package.xml after filtering
+          if [ -d "delta" ] && [ "${{ inputs.deployment_scope }}" != "full" ]; then
+            echo "🔄 Regenerating package.xml after filtering..."
+            sf sgd source delta \
+              --from "${{ steps.base.outputs.from_ref }}" \
+              --to "HEAD" \
+              --source-dir "delta" \
+              --output-dir "delta-temp" \
+              --generate-delta || true
+            
+            # Use the regenerated package.xml if it exists
+            if [ -f "delta-temp/package/package.xml" ]; then
+              cp delta-temp/package/package.xml delta/package/package.xml || true
+            fi
+            rm -rf delta-temp || true
+          fi
+
+          echo "📋 Final delta contents after filtering:"
           ls -R delta || true
 
       - name: Show manifests
@@ -189,13 +290,18 @@ jobs:
             cat drift-check/DRIFT_REPORT.md || true
             echo ""
             
-            if [ "${{ env.HALT_ON_DRIFT }}" == "true" ]; then
+            if [ "${{ env.HALT_ON_DRIFT }}" == "true" ] && [ "${{ inputs.force_deployment }}" != "true" ]; then
               echo "❌ HALTING DEPLOYMENT due to detected delta drift (HALT_ON_DRIFT=true)"
               echo "Please review the drift-check artifact and resolve differences before deploying."
               echo "The conflicting metadata must be synchronized before deployment can proceed."
+              echo "💡 To force deployment anyway, re-run with 'Force deployment' parameter set to true."
               exit 1
             else
-              echo "⚠️  PROCEEDING WITH DEPLOYMENT despite delta drift (HALT_ON_DRIFT=false)"
+              if [ "${{ inputs.force_deployment }}" == "true" ]; then
+                echo "🚀 FORCING DEPLOYMENT despite delta drift (force_deployment=true)"
+              else
+                echo "⚠️  PROCEEDING WITH DEPLOYMENT despite delta drift (HALT_ON_DRIFT=false)"
+              fi
               echo "⚠️  WARNING: This deployment will overwrite the detected org changes in the delta metadata!"
               echo "🔄 Any changes made directly in the org for the affected metadata will be lost."
             fi
